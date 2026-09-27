@@ -24,9 +24,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *
  * <p>HyperOS 3 status bar clock is {@code com.android.systemui.statusbar.views.MiuiClock}
  * (confirmed against SystemUI 17.03.260226). In 12-hour mode we want the text to read
- * like {@code 下午 3:48} (MIUI day-period marker 凌晨/上午/下午/傍晚/晚上 + space + non padded
- * hour), instead of whatever HyperOS currently renders. Non Chinese locales keep the plain
- * AM/PM marker.</p>
+ * like {@code 下午3:48} (MIUI day-period marker 半夜/凌晨/上午/中午/下午/傍晚/晚上 + non padded
+ * hour, no separator), instead of whatever HyperOS currently renders. Non Chinese locales
+ * keep the plain AM/PM marker.</p>
  */
 public final class SystemUiClockHook {
 
@@ -209,24 +209,34 @@ public final class SystemUiClockHook {
         if (isChinese(locale)) {
             Calendar calendar = Calendar.getInstance(locale);
             calendar.setTime(when);
-            return dayPeriod(calendar.get(Calendar.HOUR_OF_DAY)) + " "
+            return dayPeriod(calendar.get(Calendar.HOUR_OF_DAY))
                     + new SimpleDateFormat(FORMAT_12H_ZH, locale).format(when);
         }
         return new SimpleDateFormat(FORMAT_12H, locale).format(when);
     }
 
-    /** MIUI style Chinese day periods (theme {@code aa}): 凌晨/上午/下午/傍晚/晚上. */
+    /**
+     * MIUI style Chinese day periods (theme {@code aa}):
+     * 00:00–00:59 半夜, 01:00–05:59 凌晨, 06:00–11:59 上午, 12:00–12:59 中午,
+     * 13:00–17:59 下午, 18:00–18:59 傍晚, 19:00–23:59 晚上.
+     */
     private static String dayPeriod(int hourOfDay) {
-        if (hourOfDay < 5) {
+        if (hourOfDay == 0) {
+            return "半夜";
+        }
+        if (hourOfDay < 6) {
             return "凌晨";
         }
         if (hourOfDay < 12) {
             return "上午";
         }
+        if (hourOfDay == 12) {
+            return "中午";
+        }
         if (hourOfDay < 18) {
             return "下午";
         }
-        if (hourOfDay < 20) {
+        if (hourOfDay == 18) {
             return "傍晚";
         }
         return "晚上";
