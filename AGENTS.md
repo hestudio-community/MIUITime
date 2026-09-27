@@ -6,7 +6,9 @@ MIUITime: LSPosed/Xposed module (legacy API 82, pure Java, no UI) that restores 
 - Build: `./gradlew assembleDebug` (APK at `app/build/outputs/apk/debug/app-debug.apk`). Static check: `./gradlew lintDebug`. No unit tests exist.
 - JDK is pinned in `gradle.properties` (`org.gradle.java.home` → Android Studio bundled JBR, OpenJDK 25); AGP 9.4.1 requires JDK 17+ and Gradle 9.x (wrapper is 9.7.1, needed to run on JDK 25).
 - `app/build.gradle.kts` sets `enableKotlin = false` (the supported per-module opt-out of AGP 9 built-in Kotlin); without it AGP injects kotlin-stdlib into this pure-Java module (~2.4MB APK). Don't replace it with `android.builtInKotlin=false` in `gradle.properties` — that flag is deprecated and removed in AGP 10.
-- Deploy: `adb install -r <apk>`. A first install of a new package may fail with `INSTALL_FAILED_USER_RESTRICTED`; retry while the phone screen is unlocked (an on-device confirm dialog appears).
+- Deploy: `./gradlew installDebug` (builds and installs in one step; the LSPosed-recommended install path for module developers). With multiple devices attached, set `ANDROID_SERIAL=<id>` first.
+- A first install of a new package may fail with `INSTALL_FAILED_USER_RESTRICTED`; retry while the phone screen is unlocked (an on-device confirm dialog appears).
+- `installDebug` signs with `~/.android/debug.keystore`; if a differently-signed build (e.g. `app/release/app-release.apk`) is installed on the phone, uninstall it first or install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
 - Reload after install: `adb shell am crash com.android.systemui` (`am force-stop` is ignored for SystemUI). Verify with `adb logcat -s MIUITime:V`.
 - This directory is not a git repository; don't assume git history/commands.
 - Target device verified: Xiaomi HyperOS 4 (Android 17), SystemUI `17.03.260226`, launcher `8.01.02.7719`.

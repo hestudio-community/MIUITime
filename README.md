@@ -14,4 +14,9 @@ MIUITime
 2. 安装本软件。
 3. 勾选“系统界面”作用域。
 4. 重启系统界面或者重启手机
+
+### 从源码构建
+
+1. `./gradlew assembleDebug` — APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`
+2. `./gradlew installDebug` — 构建并安装到已连接设备
    
