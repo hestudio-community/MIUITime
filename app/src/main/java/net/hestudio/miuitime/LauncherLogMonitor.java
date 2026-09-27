@@ -1,4 +1,4 @@
-package com.hestudio.miuitime;
+package net.hestudio.miuitime;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;

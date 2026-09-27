@@ -1,4 +1,4 @@
-package com.hestudio.miuitime;
+package net.hestudio.miuitime;
 
 import android.appwidget.AppWidgetHostView;
 import android.appwidget.AppWidgetManager;

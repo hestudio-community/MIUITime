@@ -1,4 +1,4 @@
-package com.hestudio.miuitime;
+package net.hestudio.miuitime;
 
 import android.content.Context;
 import android.text.format.DateFormat;

@@ -11,11 +11,11 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.hestudio.miuitime"
+    namespace = "net.hestudio.miuitime"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.hestudio.miuitime"
+        applicationId = "net.hestudio.miuitime"
         minSdk = 34
         targetSdk = 35
         versionCode = 1000

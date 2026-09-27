@@ -22,7 +22,7 @@ MIUITime: LSPosed/Xposed module (legacy API 82, pure Java, no UI) that restores 
 - Foreground test: `ActivityManagerWrapper.sInstance` (OS4 removed `getInstance()`) + home-activity whitelist (`com.miui.home.launcher.Launcher`, `SecondaryDisplayLauncher`, `safemode.SafeLauncher`). All other `com.miui.home` activities (settings/recents/pickers) must show the clock. Fallback: `ActivityTaskManager.getService().getTasks(1)`.
 - Feature 1 hooks `MiuiClock.updateTime()` and only rewrites instances whose resource entry id is `clock`; 24h mode is left untouched. Format is `aa h:mm` (→ `下午 3:48`).
 - Scope is `com.android.systemui` only. Recommended scope is the manifest meta-data `xposedscope` → `@array/xposed_scope` (`res/values/arrays.xml`); an `assets/xposed_scope` file is ignored by LSPosed and was removed on purpose.
-- Entry: `assets/xposed_init` → `com.hestudio.miuitime.XposedEntry`.
+- Entry: `assets/xposed_init` → `net.hestudio.miuitime.XposedEntry`.
 
 ## Working on it
 - Log tag is `MIUITime`; `XLog` mirrors to logcat and the LSPosed log.

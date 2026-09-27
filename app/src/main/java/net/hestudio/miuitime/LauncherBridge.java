@@ -1,4 +1,4 @@
-package com.hestudio.miuitime;
+package net.hestudio.miuitime;
 
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
