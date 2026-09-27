@@ -12,34 +12,15 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "net.hestudio.miuitime"
-    compileSdk = 35
+    compileSdk = 37
+    enableKotlin = false
 
     defaultConfig {
         applicationId = "net.hestudio.miuitime"
         minSdk = 34
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1001
         versionName = "1.0.1"
-    }
-
-    signingConfigs {
-        create("release") {
-            if (keystorePropertiesFile.exists()) {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
-            }
-        }
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-            if (keystorePropertiesFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
-        }
     }
 
     compileOptions {
