@@ -1,0 +1,65 @@
+# ---- Gradle ----
+.gradle/
+build/
+**/build/
+
+# ---- Signing / secrets (never commit) ----
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+keystore/
+
+# ---- Android / build artifacts ----
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+release/
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# ---- Local machine config ----
+local.properties
+
+# ---- IDE: Android Studio / IntelliJ ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.navigation/
+captures/
+output.json
+
+# ---- IDE: other ----
+.vscode/
+*.swp
+*.swo
+
+# ---- Kotlin ----
+.kotlin/
+
+# ---- OS ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ---- Logs / misc ----
+*.log
+*.tmp
+*.bak
+*~
+.cxx/

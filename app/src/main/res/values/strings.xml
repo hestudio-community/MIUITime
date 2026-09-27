@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MIUITime</string>
+    <string name="xposed_description">为 HyperOS 恢复 MIUI 风格状态栏时钟：12 小时制显示“下午 3:48”；桌面时钟小部件页隐藏状态栏时间</string>
+</resources>
