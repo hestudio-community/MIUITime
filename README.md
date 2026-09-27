@@ -3,6 +3,10 @@ MIUITime
 
 为HyperOS还原MIUI的通知栏时间效果。
 
+### 如何下载
+
+请前往 https://github.com/Xposed-Modules-Repo/net.hestudio.miuitime/releases 下载。
+
 ### 适配系统
 
 - HyperOS 4 Beta（在`REDMI K80 Pro, 4.0.0.10 Beta`上测试通过）
