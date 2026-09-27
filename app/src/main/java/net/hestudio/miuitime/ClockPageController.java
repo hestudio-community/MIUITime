@@ -22,7 +22,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * <p>Page detection comes from {@link LauncherLogMonitor} (the launcher cannot be hooked),
  * foreground state comes from SystemUI's ActivityManagerWrapper, and the hide/show action
  * reuses MIUI's own clock visibility plumbing ({@code HomeStatusBarViewBinderInjector}),
- * with {@code MiuiClock.setPolicyVisibility} as a fallback and enforcement point.</p>
+ * plus a {@code View.GONE} collapse of the clock view so its layout width is freed
+ * (INVISIBLE alone leaves a blank gap in front of the status bar notification icons),
+ * with {@code MiuiClock.setPolicyVisibility} and {@code View.setVisibility} hooks as
+ * fallback and enforcement points.</p>
  */
 public final class ClockPageController implements LauncherLogMonitor.Listener {
 
@@ -30,6 +33,7 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     private static final long APPLY_DEBOUNCE_MS = 250L;
     private static final int VISIBLE = View.VISIBLE;
     private static final int INVISIBLE = View.INVISIBLE;
+    private static final int GONE = View.GONE;
 
     private static volatile ClockPageController sInstance;
 
@@ -88,7 +92,7 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
         }
     }
 
-    /** Used by the setPolicyVisibility hook to keep the clock hidden while the page requires it. */
+    /** Used by the visibility hooks to keep the clock hidden while the page requires it. */
     static boolean shouldForceHide() {
         ClockPageController instance = sInstance;
         return instance != null && instance.clockPage && !instance.overlayShowing
@@ -159,51 +163,58 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     }
 
     private boolean hideClock() {
+        boolean injectorOk = false;
         Object injector = injectorRef.get();
         if (injector != null) {
             try {
                 XposedHelpers.callMethod(injector, "hideClock", false);
-                return true;
+                injectorOk = true;
             } catch (Throwable t) {
                 XLog.w("hideClock failed, fallback to view", t);
             }
         }
-        TextView view = SystemUiClockHook.statusBarClock();
-        if (view == null) {
-            XLog.w("no status bar clock view captured");
-            return false;
-        }
-        try {
-            XposedHelpers.callMethod(view, "setPolicyVisibility", INVISIBLE);
-            return true;
-        } catch (Throwable t) {
-            XLog.w("setPolicyVisibility hide failed", t);
-            return false;
-        }
+        return applyViewVisibility(true) || injectorOk;
     }
 
     private boolean showClock() {
+        boolean injectorOk = false;
         Object injector = injectorRef.get();
         if (injector != null) {
             try {
                 XposedHelpers.callMethod(injector, "showClock", false);
-                return true;
+                injectorOk = true;
             } catch (Throwable t) {
                 XLog.w("showClock failed, fallback to view", t);
             }
         }
+        return applyViewVisibility(false) || injectorOk;
+    }
+
+    /**
+     * Applies the clock view state directly. Hide collapses the view to {@code GONE} so its
+     * layout width is freed (a plain INVISIBLE keeps the space reserved and the status bar
+     * notification icons end up floating with a blank gap in front of them).
+     */
+    private boolean applyViewVisibility(boolean hide) {
         TextView view = SystemUiClockHook.statusBarClock();
         if (view == null) {
             XLog.w("no status bar clock view captured");
             return false;
         }
+        boolean ok = false;
         try {
-            XposedHelpers.callMethod(view, "setPolicyVisibility", VISIBLE);
-            return true;
+            XposedHelpers.callMethod(view, "setPolicyVisibility", hide ? INVISIBLE : VISIBLE);
+            ok = true;
         } catch (Throwable t) {
-            XLog.w("setPolicyVisibility show failed", t);
-            return false;
+            XLog.w("setPolicyVisibility failed", t);
         }
+        try {
+            view.setVisibility(hide ? GONE : VISIBLE);
+            ok = true;
+        } catch (Throwable t) {
+            XLog.w("setVisibility failed", t);
+        }
+        return ok;
     }
 
     /** Only the actual home screen activities count; launcher settings/recents must not. */
