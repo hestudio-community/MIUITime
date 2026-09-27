@@ -10,6 +10,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.text.SimpleDateFormat;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 
@@ -23,14 +24,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *
  * <p>HyperOS 3 status bar clock is {@code com.android.systemui.statusbar.views.MiuiClock}
  * (confirmed against SystemUI 17.03.260226). In 12-hour mode we want the text to read
- * like {@code 下午 3:48} (AM/PM marker + space + non padded hour), instead of whatever
- * HyperOS currently renders.</p>
+ * like {@code 下午 3:48} (MIUI day-period marker 凌晨/上午/下午/傍晚/晚上 + space + non padded
+ * hour), instead of whatever HyperOS currently renders. Non Chinese locales keep the plain
+ * AM/PM marker.</p>
  */
 public final class SystemUiClockHook {
 
     private static final String CLOCK_CLASS = "com.android.systemui.statusbar.views.MiuiClock";
     private static final String STATUS_BAR_CLOCK_ID = "clock";
     private static final String FORMAT_12H = "aa h:mm";
+    private static final String FORMAT_12H_ZH = "h:mm";
 
     /** Captured status bar clock view (id {@code clock}), used later by the page-hide feature. */
     private static volatile WeakReference<TextView> sStatusBarClock = new WeakReference<>(null);
@@ -193,12 +196,44 @@ public final class SystemUiClockHook {
     }
 
     private static String format12Hour(Context context) {
+        Date now = new Date();
         Locale locale = Locale.getDefault();
         try {
-            return new SimpleDateFormat(FORMAT_12H, locale).format(new Date());
+            return format12Hour(locale, now);
         } catch (Throwable t) {
-            return new SimpleDateFormat(FORMAT_12H, Locale.US).format(new Date());
+            return format12Hour(Locale.US, now);
         }
+    }
+
+    private static String format12Hour(Locale locale, Date when) {
+        if (isChinese(locale)) {
+            Calendar calendar = Calendar.getInstance(locale);
+            calendar.setTime(when);
+            return dayPeriod(calendar.get(Calendar.HOUR_OF_DAY)) + " "
+                    + new SimpleDateFormat(FORMAT_12H_ZH, locale).format(when);
+        }
+        return new SimpleDateFormat(FORMAT_12H, locale).format(when);
+    }
+
+    /** MIUI style Chinese day periods (theme {@code aa}): 凌晨/上午/下午/傍晚/晚上. */
+    private static String dayPeriod(int hourOfDay) {
+        if (hourOfDay < 5) {
+            return "凌晨";
+        }
+        if (hourOfDay < 12) {
+            return "上午";
+        }
+        if (hourOfDay < 18) {
+            return "下午";
+        }
+        if (hourOfDay < 20) {
+            return "傍晚";
+        }
+        return "晚上";
+    }
+
+    private static boolean isChinese(Locale locale) {
+        return "zh".equals(locale.getLanguage());
     }
 
     private static boolean isStatusBarClock(View view) {

@@ -18,8 +18,8 @@ android {
         applicationId = "net.hestudio.miuitime"
         minSdk = 34
         targetSdk = 35
-        versionCode = 1000
-        versionName = "1.0.0"
+        versionCode = 1001
+        versionName = "1.0.1"
     }
 
     signingConfigs {
