@@ -3,6 +3,7 @@ package net.hestudio.miuitime;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -41,6 +42,21 @@ public class LauncherLogMonitorTest {
             "[Info][DataPersistence][LauncherModelManager] insertItem id=-1 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=-100 extendContainer=-1 sortMode=0 appwidgetId=101490162 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
     private static final String DELETE_ITEM_BY_APPWIDGET_ID =
             "[Info][DataPersistence][LauncherModelManager] deleteItem id=1383 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=-100 extendContainer=-1 sortMode=0 appwidgetId=101490162 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=/data/user_de/0/com.miui.home/files/maml/res/0/bc128052-1c50-4da8-b920-0728aa957a98/40126/bc128052-1c50-4da8-b920-0728aa957a98/widget_4x2";
+    /** Clock widget inside a folder: container is the folder's row id, not -100. */
+    private static final String INSERT_ITEM_FOLDER_CLOCK =
+            "[Info][DataPersistence][LauncherModelManager] insertItem id=-1 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=5 extendContainer=-1 sortMode=0 appwidgetId=101490164 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
+    /** Clock widget in the hotseat (container=-101). */
+    private static final String INSERT_ITEM_HOTSEAT_CLOCK =
+            "[Info][DataPersistence][LauncherModelManager] insertItem id=-1 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=-101 extendContainer=-1 sortMode=0 appwidgetId=101490165 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
+    /** Desktop clock tracked under the pid: key (no id, no appwidgetId). */
+    private static final String INSERT_ITEM_PID_KEYED_CLOCK =
+            "[Info][DataPersistence][LauncherModelManager] insertItem id=-1 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=-100 extendContainer=-1 sortMode=0 appwidgetId=-1 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
+    /** Folder child sharing the desktop widget's productId must not remove it. */
+    private static final String DELETE_ITEM_FOLDER_SAME_PRODUCT =
+            "[Info][DataPersistence][LauncherModelManager] deleteItem id=1400 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,0) span=(4,2) container=5 extendContainer=-1 sortMode=0 appwidgetId=101490166 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
+    /** The matching desktop delete of the pid-keyed entry (productId fallback). */
+    private static final String DELETE_ITEM_PID_KEYED =
+            "[Info][DataPersistence][LauncherModelManager] deleteItem id=1383 title=天气时钟 pkg=null type=19/ItemType.maml screen=9 cell=(0,3) span=(4,2) container=-100 extendContainer=-1 sortMode=0 appwidgetId=-1 provider=null productId=bc128052-1c50-4da8-b920-0728aa957a98 uri=";
 
     private LauncherLogMonitor monitor;
     private List<Boolean> notifications;
@@ -50,6 +66,11 @@ public class LauncherLogMonitorTest {
         monitor = new LauncherLogMonitor();
         notifications = new ArrayList<>();
         monitor.start((clockPage, overlayShowing) -> notifications.add(clockPage));
+    }
+
+    @After
+    public void tearDown() {
+        monitor.stop();
     }
 
     @Test
@@ -97,6 +118,31 @@ public class LauncherLogMonitorTest {
         monitor.parse(OVERVIEW_HOME);
         monitor.parse(PROCESS_ITEM_FOLDER_CHILD);
         assertFalse(monitor.clockPage());
+    }
+
+    @Test
+    public void modelItemsOutsideDesktopAreIgnored() {
+        monitor.parse(OVERVIEW_SCREEN9);
+        monitor.parse(INSERT_ITEM_FOLDER_CLOCK);
+        assertFalse("a folder clock widget must not hide the status bar clock", monitor.clockPage());
+        assertFalse(monitor.hasClockItem(9));
+
+        monitor.parse(INSERT_ITEM_HOTSEAT_CLOCK);
+        assertFalse("a hotseat clock widget must not hide the status bar clock", monitor.clockPage());
+        assertFalse(monitor.hasClockItem(9));
+    }
+
+    @Test
+    public void folderDeleteMustNotRemoveDesktopClockWithSameProduct() {
+        monitor.parse(OVERVIEW_SCREEN9);
+        monitor.parse(INSERT_ITEM_PID_KEYED_CLOCK);
+        assertTrue(monitor.clockPage());
+
+        monitor.parse(DELETE_ITEM_FOLDER_SAME_PRODUCT);
+        assertTrue("a folder child delete must not clear the desktop clock", monitor.clockPage());
+
+        monitor.parse(DELETE_ITEM_PID_KEYED);
+        assertFalse("the desktop delete still matches via the productId fallback", monitor.clockPage());
     }
 
     @Test

@@ -8,15 +8,8 @@ public class XposedEntry implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            switch (lpparam.packageName) {
-                case "com.android.systemui":
-                    SystemUiClockHook.init(lpparam);
-                    break;
-                case "com.miui.home":
-                    LauncherBridge.init(lpparam);
-                    break;
-                default:
-                    break;
+            if ("com.android.systemui".equals(lpparam.packageName)) {
+                SystemUiClockHook.init(lpparam);
             }
         } catch (Throwable t) {
             XLog.e("init failed for " + lpparam.packageName, t);

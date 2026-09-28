@@ -83,7 +83,8 @@ public final class LauncherLogMonitor {
      * screen=9 cell=(0,2) span=(4,2) container=-100 extendContainer=-1 sortMode=0
      * appwidgetId=101490163 provider=null productId=... uri=...}.
      * Shared by {@code insertItem}, {@code deleteItem} and the chunks of
-     * {@code updateItemBatch count=N first10=[...]}.
+     * {@code updateItemBatch count=N first10=[...]}. Only {@code container=-100}
+     * (desktop) items count; folder and hotseat items never hide the clock.
      */
     private static final Pattern MODEL_ITEM = Pattern.compile(
             "(?<![A-Za-z])id=(-?\\d+) title=(.*?) pkg=(\\S+)"
@@ -127,6 +128,7 @@ public final class LauncherLogMonitor {
     private volatile String launcherState = "normalState";
     private volatile boolean running;
     private Thread worker;
+    private volatile Process process;
 
     public void start(Listener listener) {
         this.listener = listener;
@@ -139,9 +141,20 @@ public final class LauncherLogMonitor {
         worker.start();
     }
 
+    public void stop() {
+        running = false;
+        Process p = process;
+        if (p != null) {
+            p.destroy();
+        }
+        Thread w = worker;
+        if (w != null) {
+            w.interrupt();
+        }
+    }
+
     private void runLoop() {
         while (running) {
-            Process process = null;
             try {
                 ProcessBuilder builder = new ProcessBuilder(LOGCAT, "-v", "brief", "-s", FLUTTER_TAG);
                 builder.redirectErrorStream(true);
@@ -159,8 +172,10 @@ public final class LauncherLogMonitor {
             } catch (Throwable t) {
                 XLog.w("launcher logcat reader failed", t);
             } finally {
-                if (process != null) {
-                    process.destroy();
+                Process p = process;
+                process = null;
+                if (p != null) {
+                    p.destroy();
                 }
             }
             if (running) {
@@ -295,6 +310,12 @@ public final class LauncherLogMonitor {
     }
 
     private void upsertItem(Matcher m) {
+        // Same container rule as PROCESS_ITEM: only desktop items belong to a
+        // workspace page; folder (positive) and hotseat (-101) items must not
+        // affect the per-page clock state.
+        if (Integer.parseInt(m.group(6)) != CONTAINER_DESKTOP) {
+            return;
+        }
         int id = Integer.parseInt(m.group(1));
         int screenId = Integer.parseInt(m.group(5));
         String type = m.group(4);
@@ -315,6 +336,11 @@ public final class LauncherLogMonitor {
     }
 
     private void removeItem(Matcher m) {
+        // Mirrors upsertItem: folder/hotseat items are never inventoried, and the
+        // productId fallback must not let them remove a same-product desktop entry.
+        if (Integer.parseInt(m.group(6)) != CONTAINER_DESKTOP) {
+            return;
+        }
         int id = Integer.parseInt(m.group(1));
         String title = m.group(2).trim();
         int appwidgetId = Integer.parseInt(m.group(7));
@@ -468,10 +494,6 @@ public final class LauncherLogMonitor {
     }
 
     // ---- package-private accessors for tests ----
-
-    int currentScreenId() {
-        return currentScreenId;
-    }
 
     boolean clockPage() {
         return clockPage;
