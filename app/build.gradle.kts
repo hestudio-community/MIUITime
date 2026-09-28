@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "net.hestudio.miuitime"
-        minSdk = 34
+        minSdk = 35
         targetSdk = 37
-        versionCode = 1001
-        versionName = "1.0.1"
+        versionCode = 1002
+        versionName = "1.1.0"
     }
 
     compileOptions {

@@ -31,6 +31,8 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
 
     private static final long POLL_INTERVAL_MS = 3000L;
     private static final long APPLY_DEBOUNCE_MS = 250L;
+    /** Shows settle longer than hides: page transitions must not flash the clock. */
+    private static final long APPLY_SHOW_DEBOUNCE_MS = 600L;
     private static final int VISIBLE = View.VISIBLE;
     private static final int INVISIBLE = View.INVISIBLE;
     private static final int GONE = View.GONE;
@@ -45,6 +47,7 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     private volatile boolean overlayShowing;
     private boolean applied;
     private boolean appliedHidden;
+    private volatile boolean showPending;
     private boolean pollScheduled;
     private boolean retryScheduled;
     private String lastTopActivity;
@@ -54,6 +57,7 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     private final Runnable applyRunnable = new Runnable() {
         @Override
         public void run() {
+            showPending = false;
             boolean hide = clockPage && !overlayShowing && isLauncherForeground();
             apply(hide, lastReason);
         }
@@ -95,8 +99,15 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     /** Used by the visibility hooks to keep the clock hidden while the page requires it. */
     static boolean shouldForceHide() {
         ClockPageController instance = sInstance;
-        return instance != null && instance.clockPage && !instance.overlayShowing
-                && instance.isLauncherForeground();
+        if (instance == null) {
+            return false;
+        }
+        if (!instance.showPending && !(instance.clockPage && !instance.overlayShowing)) {
+            return false;
+        }
+        // While a show is deferred the clock must stay collapsed: otherwise the
+        // transition back to hidden flashes it for the length of the debounce.
+        return instance.isLauncherForeground();
     }
 
     private void start() {
@@ -129,9 +140,14 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
             public void run() {
                 schedulePollIfNeeded();
                 // Debounce: activity/page transitions can emit several state changes in a row,
-                // applying only the settled state avoids a clock flicker.
+                // applying only the settled state avoids a clock flicker. Shows settle
+                // longer than hides so a clock page briefly misdetected mid-swipe
+                // (e.g. before the launcher re-emits its exposure line) cannot flash.
+                boolean wantsHide = clockPage && !overlayShowing;
+                showPending = !wantsHide && applied && appliedHidden;
                 mainHandler.removeCallbacks(applyRunnable);
-                mainHandler.postDelayed(applyRunnable, APPLY_DEBOUNCE_MS);
+                mainHandler.postDelayed(applyRunnable,
+                        wantsHide ? APPLY_DEBOUNCE_MS : APPLY_SHOW_DEBOUNCE_MS);
             }
         });
     }
