@@ -11,8 +11,8 @@ android {
         applicationId = "net.hestudio.miuitime"
         minSdk = 35
         targetSdk = 37
-        versionCode = 1002
-        versionName = "1.1.0"
+        versionCode = 1003
+        versionName = "1.1.1"
     }
 
     compileOptions {
@@ -27,5 +27,7 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    // Needed at test runtime so classes referencing hook types (e.g. ClockPageController) load.
+    testImplementation("de.robv.android.xposed:api:82")
     testImplementation("junit:junit:4.13.2")
 }

@@ -38,25 +38,49 @@ public final class SystemUiClockHook {
     /** Captured status bar clock view (id {@code clock}), used later by the page-hide feature. */
     private static volatile WeakReference<TextView> sStatusBarClock = new WeakReference<>(null);
 
+    /**
+     * Fast-path flag for the visibility hooks. Published by {@link ClockPageController} whenever
+     * the hide state changes; the hook callbacks only ever <em>read</em> it, so they stay free of
+     * binder calls, reflection and locking on SystemUI's hot paths (every
+     * {@code View.setVisibility} in the process goes through that hook).
+     */
+    private static volatile boolean sForceHide;
+
     private SystemUiClockHook() {
     }
 
+    /**
+     * Called on SystemUI's bind path (inside {@code handleBindApplication}), which is on the
+     * keyguard critical path at boot. Only the hooks that must catch early {@code MiuiClock}
+     * construction are installed here; everything else (feature 2 controller, launcher log
+     * reader, injector/task-stack hooks) is deferred to {@link DeferredInit} until after boot.
+     */
     public static void init(XC_LoadPackage.LoadPackageParam lpparam) {
         Class<?> clockClass = XposedHelpers.findClassIfExists(CLOCK_CLASS, lpparam.classLoader);
         if (clockClass == null) {
             XLog.w("MiuiClock class not found, feature 1 inactive");
+            DeferredInit.start(lpparam);
             return;
         }
         hookConstructors(clockClass);
         hookUpdateTime(clockClass);
-        hookVisibilityRecon(clockClass, lpparam);
+        hookPolicyVisibility(clockClass);
         hookViewVisibility();
-        ClockPageController.init(lpparam);
+        DeferredInit.start(lpparam);
         XLog.i("feature 1 hooks installed");
     }
 
     static TextView statusBarClock() {
         return sStatusBarClock.get();
+    }
+
+    static void setForceHide(boolean hide) {
+        sForceHide = hide;
+    }
+
+    /** Pure volatile read: safe to call from the {@code View.setVisibility} hook. */
+    private static boolean forceHide() {
+        return sForceHide;
     }
 
     private static void hookConstructors(Class<?> clockClass) {
@@ -77,7 +101,7 @@ public final class SystemUiClockHook {
                             }
                             sStatusBarClock = new WeakReference<>(view);
                             XLog.i("status bar clock view captured");
-                            if (ClockPageController.shouldForceHide()) {
+                            if (forceHide()) {
                                 view.setVisibility(View.GONE);
                             }
                         } catch (Throwable t) {
@@ -124,17 +148,14 @@ public final class SystemUiClockHook {
     }
 
     /**
-     * Hooks the clock visibility plumbing:
-     * <ul>
-     *     <li>captures the {@code HomeStatusBarViewBinderInjector} instance so the page
-     *     controller can drive {@code hideClock/showClock} with it;</li>
-     *     <li>forces {@code setPolicyVisibility(INVISIBLE)} on the status bar clock while a
-     *     clock widget page is active, so SystemUI cannot re-show it in between, and
-     *     collapses it to {@code View.GONE} afterwards so its layout width is freed
-     *     (INVISIBLE alone would leave a blank gap before the notification icons).</li>
-     * </ul>
+     * Hooks {@code MiuiClock.setPolicyVisibility} so SystemUI cannot re-show the status bar clock
+     * while a clock widget page is active: the call is redirected to INVISIBLE and the view is
+     * collapsed to {@code View.GONE} afterwards.
+     *
+     * <p>Installed early (bind path) because it is cheap and must cover every clock view from the
+     * moment SystemUI inflates the status bar. Only reads the {@link #forceHide()} flag.</p>
      */
-    private static void hookVisibilityRecon(Class<?> clockClass, XC_LoadPackage.LoadPackageParam lpparam) {
+    private static void hookPolicyVisibility(Class<?> clockClass) {
         for (Method method : clockClass.getDeclaredMethods()) {
             if (!"setPolicyVisibility".equals(method.getName())) {
                 continue;
@@ -147,7 +168,7 @@ public final class SystemUiClockHook {
                             if (param.args.length > 0
                                     && param.thisObject instanceof View
                                     && isStatusBarClock((View) param.thisObject)
-                                    && ClockPageController.shouldForceHide()) {
+                                    && forceHide()) {
                                 param.args[0] = View.INVISIBLE;
                             }
                         } catch (Throwable ignored) {
@@ -159,7 +180,7 @@ public final class SystemUiClockHook {
                         try {
                             if (param.thisObject instanceof View
                                     && isStatusBarClock((View) param.thisObject)
-                                    && ClockPageController.shouldForceHide()) {
+                                    && forceHide()) {
                                 ((View) param.thisObject).setVisibility(View.GONE);
                             }
                         } catch (Throwable ignored) {
@@ -170,7 +191,14 @@ public final class SystemUiClockHook {
                 XLog.w("cannot hook setPolicyVisibility", t);
             }
         }
+    }
 
+    /**
+     * Captures the {@code HomeStatusBarViewBinderInjector} instance so the page controller can
+     * drive {@code hideClock/showClock} with it. Deferred (see {@link DeferredInit}): the injector
+     * is only needed by feature 2, which must not run on the boot critical path.
+     */
+    static void hookInjector(XC_LoadPackage.LoadPackageParam lpparam) {
         Class<?> injector = XposedHelpers.findClassIfExists(
                 "com.android.systemui.statusbar.pipeline.shared.ui.binder.HomeStatusBarViewBinderInjector",
                 lpparam.classLoader);
@@ -201,6 +229,11 @@ public final class SystemUiClockHook {
      * widget page is active. {@code View.setVisibility} is the funnel every visibility change
      * goes through, so SystemUI cannot re-show the clock in between and no layout width is
      * reserved in front of the status bar notification icons.
+     *
+     * <p>This hook is process-wide and lands on a very hot path, so the callback is kept at zero
+     * cost unless a hide is active: one volatile read first, then an identity check against the
+     * captured status bar clock only. It must never do reflection or binder calls — the hide
+     * state flag is maintained by {@link ClockPageController} out of band.</p>
      */
     private static void hookViewVisibility() {
         Method target;
@@ -215,16 +248,17 @@ public final class SystemUiClockHook {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     try {
+                        if (!forceHide()) {
+                            return;
+                        }
                         if (param.args.length == 0) {
                             return;
                         }
                         TextView clock = statusBarClock();
-                        if (clock == null || !isSameClockInstance(param.thisObject, clock)) {
+                        if (clock == null || param.thisObject != clock) {
                             return;
                         }
-                        if (ClockPageController.shouldForceHide()) {
-                            param.args[0] = View.GONE;
-                        }
+                        param.args[0] = View.GONE;
                     } catch (Throwable ignored) {
                     }
                 }
@@ -233,12 +267,6 @@ public final class SystemUiClockHook {
         } catch (Throwable t) {
             XLog.w("cannot hook View.setVisibility", t);
         }
-    }
-
-    /** Identity or same view id: SystemUI creates more than one clock view with id {@code clock}. */
-    private static boolean isSameClockInstance(Object self, TextView clock) {
-        return self == clock
-                || (self instanceof View && ((View) self).getId() == clock.getId());
     }
 
     private static void applyMiuiStyle(TextView view) {
