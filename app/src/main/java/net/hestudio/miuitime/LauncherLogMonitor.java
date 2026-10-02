@@ -1,7 +1,10 @@
 package net.hestudio.miuitime;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -9,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -265,15 +269,68 @@ public final class LauncherLogMonitor {
     private Thread worker;
     private volatile Process process;
 
+    /** Optional persisted layout cache bridging the SystemUI-restart gap (see {@link InventoryCache}). */
+    private volatile File cacheFile;
+    /** Screens known to hold a plain desktop clock widget — restored-cache facts only. */
+    private final Set<Integer> cachedClockScreens = ConcurrentHashMap.newKeySet();
+    /** While true the restored cache is the only layout knowledge and must not be overwritten. */
+    private volatile boolean cacheActive;
+    /** Fresh launcher layout data has been seen: a late cache restore must never override it. */
+    private volatile boolean layoutSeen;
+    private String lastCacheSignature;
+
+    /** Test/dev override for the cache file; when unset the file lives in the app files dir. */
+    public void setCacheFile(File cacheFile) {
+        this.cacheFile = cacheFile;
+    }
+
+    /**
+     * Resolved lazily on every use: right after SystemUI's process start the application
+     * context (and thus the files dir) may not exist yet — {@link #tryRestoreCache} retries.
+     */
+    private File cacheFile() {
+        File override = cacheFile;
+        if (override != null) {
+            return override;
+        }
+        try {
+            File dir = DeviceState.filesDir();
+            return dir == null ? null : new File(dir, "launcher_inventory_cache");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     public void start(Listener listener) {
         this.listener = listener;
         if (running) {
             return;
         }
         running = true;
+        if (!tryRestoreCache()) {
+            // The app files dir can be unavailable for a moment after process start; retry on a
+            // background thread until it resolves (or fresh layout data makes it moot).
+            Thread restore = new Thread(this::restoreWithRetry, "MIUITimeCacheRestore");
+            restore.setDaemon(true);
+            restore.start();
+        }
         worker = new Thread(this::runLoop, "MIUITimeLogcat");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private void restoreWithRetry() {
+        for (int i = 0; i < 10 && running; i++) {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (tryRestoreCache()) {
+                return;
+            }
+        }
     }
 
     public void stop() {
@@ -286,6 +343,107 @@ public final class LauncherLogMonitor {
         if (w != null) {
             w.interrupt();
         }
+    }
+
+    /**
+     * Loads the persisted layout cache, if any, so the clock-page state survives a mid-session
+     * SystemUI restart (the launcher's one-shot cold-start lines are gone from the ring buffer
+     * by then and it only re-emits {@code screen()} snapshots on a page change).
+     *
+     * @return {@code true} when the attempt is done (file resolved — found or not); {@code false}
+     *     when the cache file cannot be resolved yet and the call should be retried.
+     */
+    boolean tryRestoreCache() {
+        if (layoutSeen) {
+            // Fresh launcher data already flowed and wins over any cache.
+            return true;
+        }
+        File file = cacheFile();
+        if (file == null) {
+            return false;
+        }
+        try {
+            if (file.exists()) {
+                InventoryCache cache = InventoryCache.decode(
+                        new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
+                if (cache != null && cache.usableFor(InventoryCache.readBootId())) {
+                    applyCache(cache);
+                    XLog.i("inventory cache restored: current=" + cache.currentScreenId
+                            + " clockScreens=" + cache.clockScreens);
+                }
+            }
+        } catch (Throwable t) {
+            XLog.w("inventory cache restore failed", t);
+        }
+        return true;
+    }
+
+    /** Package-visible for tests: adopts a restored cache as the pre-first-layout state. */
+    void applyCache(InventoryCache cache) {
+        if (layoutSeen) {
+            return;
+        }
+        cachedClockScreens.clear();
+        cachedClockScreens.addAll(cache.clockScreens);
+        cacheActive = !cache.clockScreens.isEmpty();
+        if (currentScreenId < 0 && cache.currentScreenId >= 0) {
+            currentScreenId = cache.currentScreenId;
+        }
+        updateClockPage(computeClock(currentScreenId));
+    }
+
+    /**
+     * Real launcher layout data arrived: drop the restored cache so it can never contradict
+     * fresh facts. Bounded staleness by construction — the cache is only trusted between the
+     * SystemUI restart and the first layout/item line.
+     */
+    private void invalidateCache() {
+        layoutSeen = true;
+        if (cacheActive || !cachedClockScreens.isEmpty()) {
+            cacheActive = false;
+            cachedClockScreens.clear();
+        }
+    }
+
+    private void saveCache() {
+        File file = cacheFile();
+        if (file == null || cacheActive) {
+            // While a restored cache is still in effect the live inventory is known to be
+            // incomplete; overwriting the file with it would lose the restored state.
+            return;
+        }
+        try {
+            String bootId = InventoryCache.readBootId();
+            if (bootId == null) {
+                return;
+            }
+            String text = new InventoryCache(bootId, currentScreenId, plainClockScreens()).encode();
+            if (text.equals(lastCacheSignature)) {
+                return;
+            }
+            Files.write(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
+            boolean first = lastCacheSignature == null;
+            lastCacheSignature = text;
+            if (first) {
+                XLog.i("inventory cache saved: " + text.replace('\n', ' '));
+            }
+        } catch (Throwable t) {
+            XLog.w("inventory cache save failed", t);
+        }
+    }
+
+    /** Only plain desktop clock items are cached — stacked-widget pages are volatile (top flips). */
+    private Set<Integer> plainClockScreens() {
+        Set<Integer> out = new TreeSet<>();
+        for (Map.Entry<Integer, Map<String, Item>> entry : inventory.entrySet()) {
+            for (Item item : entry.getValue().values()) {
+                if (!item.stackContainer && item.clock && item.stackId < 0) {
+                    out.add(entry.getKey());
+                    break;
+                }
+            }
+        }
+        return out;
     }
 
     private void runLoop() {
@@ -340,6 +498,7 @@ public final class LauncherLogMonitor {
 
         m = OVERVIEW.matcher(line);
         if (m.find()) {
+            invalidateCache();
             int screenId = Integer.parseInt(m.group(1));
             currentScreenId = screenId;
             updateClockPage(computeClock(screenId));
@@ -348,6 +507,7 @@ public final class LauncherLogMonitor {
 
         m = SCREEN.matcher(line);
         if (m.find()) {
+            invalidateCache();
             int screenId = Integer.parseInt(m.group(1));
             List<Item> items = parseScreenItems(m.group(2));
             int declared = items.size();
@@ -362,6 +522,7 @@ public final class LauncherLogMonitor {
 
         m = PROCESS_ITEM.matcher(line);
         if (m.find()) {
+            invalidateCache();
             int container = Integer.parseInt(m.group(4));
             int screenId = Integer.parseInt(m.group(3));
             if (container == CONTAINER_DESKTOP && screenId >= 0) {
@@ -450,6 +611,7 @@ public final class LauncherLogMonitor {
         // [LauncherModelManager] <verb> ... — routed by verb so the duplicated
         // [StackMemberWriteDiag] "op=..." warning lines are never double counted.
         if (line.contains("[LauncherModelManager] deleteItem ")) {
+            invalidateCache();
             m = MODEL_ITEM.matcher(line);
             if (m.find()) {
                 removeItem(m);
@@ -458,6 +620,7 @@ public final class LauncherLogMonitor {
             return;
         }
         if (line.contains("[LauncherModelManager] insertItem ")) {
+            invalidateCache();
             m = MODEL_ITEM.matcher(line);
             if (m.find()) {
                 upsertItem(m);
@@ -466,6 +629,7 @@ public final class LauncherLogMonitor {
             return;
         }
         if (line.contains("[LauncherModelManager] updateItemBatch ")) {
+            invalidateCache();
             m = MODEL_ITEM.matcher(line);
             boolean changed = false;
             while (m.find()) {
@@ -482,6 +646,7 @@ public final class LauncherLogMonitor {
         // Must come after updateItemBatch (whose name contains "updateItem" too,
         // but the trailing space in the marker keeps the two apart).
         if (line.contains("[LauncherModelManager] updateItem ")) {
+            invalidateCache();
             m = MODEL_ITEM.matcher(line);
             if (m.find()) {
                 upsertItem(m);
@@ -976,6 +1141,12 @@ public final class LauncherLogMonitor {
                 return true;
             }
         }
+        // Restored-cache fallback for the SystemUI-restart gap: until the first fresh layout
+        // line arrives, a cached plain-desktop-clock page still counts as a clock page
+        // (stacked pages are never cached — their visible member flips).
+        if (cacheActive && screenId >= 0 && cachedClockScreens.contains(screenId)) {
+            return true;
+        }
         return false;
     }
 
@@ -1015,6 +1186,7 @@ public final class LauncherLogMonitor {
             XLog.i("current page has clock=" + hasClock);
             notifyState();
         }
+        saveCache();
     }
 
     private void notifyState() {

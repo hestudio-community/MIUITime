@@ -60,6 +60,19 @@ final class DeviceState {
         }
     }
 
+    /**
+     * Files dir of the hosting app (SystemUI) for the persisted inventory cache, or {@code null}
+     * when no application context is available yet (cache disabled — fail toward showing).
+     */
+    static java.io.File filesDir() {
+        try {
+            Context context = currentApplication();
+            return context == null ? null : context.getFilesDir();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private static Context currentApplication() {
         try {
             Class<?> activityThread = Class.forName("android.app.ActivityThread");

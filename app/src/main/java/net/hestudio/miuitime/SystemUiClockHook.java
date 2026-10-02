@@ -10,9 +10,12 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -34,9 +37,18 @@ public final class SystemUiClockHook {
     private static final String STATUS_BAR_CLOCK_ID = "clock";
     private static final String FORMAT_12H = "aa h:mm";
     private static final String FORMAT_12H_ZH = "h:mm";
+    /** Bound on the captured clock set: SystemUI creates more than one {@code id=clock} MiuiClock. */
+    private static final int MAX_CLOCK_VIEWS = 4;
 
-    /** Captured status bar clock view (id {@code clock}), used later by the page-hide feature. */
-    private static volatile WeakReference<TextView> sStatusBarClock = new WeakReference<>(null);
+    /**
+     * Captured status bar clock views (id {@code clock}), used later by the page-hide feature.
+     * SystemUI inflates more than one {@code MiuiClock} with that id (observed: two instances
+     * created in the same millisecond), so every matching instance is kept — a single reference
+     * silently dropped all but the last one and left hide/show acting on the wrong view.
+     * Written from the constructor hook; read on hot paths via {@link #isCapturedClock(Object)}.
+     */
+    private static final CopyOnWriteArrayList<WeakReference<TextView>> sStatusBarClocks =
+            new CopyOnWriteArrayList<>();
 
     /**
      * Fast-path flag for the visibility hooks. Published by {@link ClockPageController} whenever
@@ -70,8 +82,42 @@ public final class SystemUiClockHook {
         XLog.i("feature 1 hooks installed");
     }
 
-    static TextView statusBarClock() {
-        return sStatusBarClock.get();
+    /** All live captured status bar clock views. */
+    static List<TextView> statusBarClocks() {
+        List<TextView> out = new ArrayList<>(sStatusBarClocks.size());
+        for (WeakReference<TextView> ref : sStatusBarClocks) {
+            TextView view = ref.get();
+            if (view != null) {
+                out.add(view);
+            }
+        }
+        return out;
+    }
+
+    /** Identity membership test for the hot visibility hooks. */
+    private static boolean isCapturedClock(Object self) {
+        for (WeakReference<TextView> ref : sStatusBarClocks) {
+            if (ref.get() == self) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Registers a clock view (constructor hook only): dedupes, prunes GC'd refs, keeps the set bounded. */
+    private static void captureClock(TextView view) {
+        for (WeakReference<TextView> ref : sStatusBarClocks) {
+            TextView known = ref.get();
+            if (known == null) {
+                sStatusBarClocks.remove(ref);
+            } else if (known == view) {
+                return;
+            }
+        }
+        while (sStatusBarClocks.size() >= MAX_CLOCK_VIEWS) {
+            sStatusBarClocks.remove(0);
+        }
+        sStatusBarClocks.add(new WeakReference<>(view));
     }
 
     static void setForceHide(boolean hide) {
@@ -99,8 +145,8 @@ public final class SystemUiClockHook {
                             if (!isStatusBarClock(view)) {
                                 return;
                             }
-                            sStatusBarClock = new WeakReference<>(view);
-                            XLog.i("status bar clock view captured");
+                            captureClock(view);
+                            XLog.i("status bar clock view captured (" + parentInfo(view) + ")");
                             if (forceHide()) {
                                 view.setVisibility(View.GONE);
                             }
@@ -155,6 +201,24 @@ public final class SystemUiClockHook {
      * <p>Installed early (bind path) because it is cheap and must cover every clock view from the
      * moment SystemUI inflates the status bar. Only reads the {@link #forceHide()} flag.</p>
      */
+    /**
+     * Pure rewrite rule for the {@code setPolicyVisibility} before hook (unit-tested): while a
+     * hide is enforced, any policy-visibility request for the status bar clock is redirected to
+     * INVISIBLE. Callers short-circuit on {@link #forceHide()} <em>before</em> evaluating the
+     * (more expensive) clock identity.
+     */
+    static int enforcePolicyArg(int requested, boolean forceHide, boolean isClock) {
+        return forceHide && isClock ? View.INVISIBLE : requested;
+    }
+
+    /**
+     * Pure rewrite rule for the {@code View.setVisibility} enforcement hook (unit-tested): while
+     * a hide is enforced, visibility changes on a captured status bar clock collapse to GONE.
+     */
+    static int enforceVisibilityArg(int requested, boolean forceHide, boolean capturedClock) {
+        return forceHide && capturedClock ? View.GONE : requested;
+    }
+
     private static void hookPolicyVisibility(Class<?> clockClass) {
         for (Method method : clockClass.getDeclaredMethods()) {
             if (!"setPolicyVisibility".equals(method.getName())) {
@@ -165,11 +229,14 @@ public final class SystemUiClockHook {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         try {
-                            if (param.args.length > 0
-                                    && param.thisObject instanceof View
-                                    && isStatusBarClock((View) param.thisObject)
-                                    && forceHide()) {
-                                param.args[0] = View.INVISIBLE;
+                            // Cheap first: one volatile read; the resource-entry lookup only
+                            // runs while a hide is actually enforced.
+                            if (param.args.length == 0 || !forceHide()) {
+                                return;
+                            }
+                            if (param.thisObject instanceof View) {
+                                param.args[0] = enforcePolicyArg((Integer) param.args[0],
+                                        forceHide(), isStatusBarClock((View) param.thisObject));
                             }
                         } catch (Throwable ignored) {
                         }
@@ -178,9 +245,11 @@ public final class SystemUiClockHook {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         try {
+                            if (!forceHide()) {
+                                return;
+                            }
                             if (param.thisObject instanceof View
-                                    && isStatusBarClock((View) param.thisObject)
-                                    && forceHide()) {
+                                    && isStatusBarClock((View) param.thisObject)) {
                                 ((View) param.thisObject).setVisibility(View.GONE);
                             }
                         } catch (Throwable ignored) {
@@ -232,8 +301,9 @@ public final class SystemUiClockHook {
      *
      * <p>This hook is process-wide and lands on a very hot path, so the callback is kept at zero
      * cost unless a hide is active: one volatile read first, then an identity check against the
-     * captured status bar clock only. It must never do reflection or binder calls — the hide
-     * state flag is maintained by {@link ClockPageController} out of band.</p>
+     * captured status bar clocks only. It must never do reflection or binder calls — the hide
+     * state flag is maintained by {@link ClockPageController} out of band and must be published
+     * before any apply action runs (see {@link HideGate#beginApply}).</p>
      */
     private static void hookViewVisibility() {
         Method target;
@@ -248,17 +318,11 @@ public final class SystemUiClockHook {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     try {
-                        if (!forceHide()) {
+                        if (param.args.length == 0 || !forceHide()) {
                             return;
                         }
-                        if (param.args.length == 0) {
-                            return;
-                        }
-                        TextView clock = statusBarClock();
-                        if (clock == null || param.thisObject != clock) {
-                            return;
-                        }
-                        param.args[0] = View.GONE;
+                        param.args[0] = enforceVisibilityArg((Integer) param.args[0],
+                                forceHide(), isCapturedClock(param.thisObject));
                     } catch (Throwable ignored) {
                     }
                 }
@@ -351,5 +415,18 @@ public final class SystemUiClockHook {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** Short parent descriptor for the capture log, so multiple {@code clock} instances can be told apart. */
+    private static String parentInfo(View view) {
+        try {
+            Object parent = view.getParent();
+            if (parent instanceof View) {
+                String name = resourceEntryName((View) parent);
+                return "parent=" + (name != null ? name : "id=" + ((View) parent).getId());
+            }
+        } catch (Throwable ignored) {
+        }
+        return "parent=?";
     }
 }

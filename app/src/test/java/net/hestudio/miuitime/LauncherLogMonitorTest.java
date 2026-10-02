@@ -1,5 +1,6 @@
 package net.hestudio.miuitime;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -7,7 +8,11 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -226,6 +231,7 @@ public class LauncherLogMonitorTest {
     @After
     public void tearDown() {
         monitor.stop();
+        InventoryCache.bootIdForTests = null;
     }
 
     @Test
@@ -758,5 +764,96 @@ public class LauncherLogMonitorTest {
         // A real flip to the clock: the title line announces the new displayed member.
         monitor.parse(STACK_TITLE_WIDGET_CLOCK_159);
         assertTrue("a real flip to the clock hides again", monitor.clockPage());
+    }
+
+    // ---- inventory cache (mid-session SystemUI restart gap) ----
+
+    @Test
+    public void restoredCacheHidesClockUntilFirstFreshLayout() {
+        monitor.applyCache(new InventoryCache("boot-x", 1, Collections.singletonList(1)));
+        assertTrue("restored cache must report the clock page", monitor.clockPage());
+
+        // State-only lines carry no layout knowledge and must not drop the cache.
+        monitor.parse("[Info]AllAppsTransitionController setState: state=normalState, belowState=normalState");
+        assertTrue("state lines must not invalidate the restored cache", monitor.clockPage());
+
+        // The first fresh layout line drops the cache; the empty snapshot knows no items.
+        monitor.parse(EMPTY_SCREEN_HOME);
+        assertFalse("fresh layout must win over the restored cache", monitor.clockPage());
+    }
+
+    @Test
+    public void restoredCacheDoesNotHideOtherPages() {
+        // Cached clock lives on screen 1; the current page is screen 9.
+        monitor.applyCache(new InventoryCache("boot-x", 9, Collections.singletonList(1)));
+        assertFalse("a page without a cached clock must show", monitor.clockPage());
+    }
+
+    @Test
+    public void freshItemStreamAfterRestoreReplacesCache() {
+        monitor.applyCache(new InventoryCache("boot-x", 1, Collections.singletonList(1)));
+        assertTrue(monitor.clockPage());
+
+        monitor.parse(PROCESS_ITEM_CLOCK_APP_ICON); // fresh item data: cache invalidated
+        assertFalse("fresh item data must win over the restored cache", monitor.clockPage());
+    }
+
+    @Test
+    public void cacheFileIsWrittenFromFreshDataAndPreservedWhileRestored() throws Exception {
+        InventoryCache.bootIdForTests = "boot-x";
+        File file = File.createTempFile("miuitime_inventory", ".cache");
+        file.deleteOnExit();
+        monitor.setCacheFile(file);
+
+        monitor.applyCache(new InventoryCache("boot-x", 1, Collections.singletonList(1)));
+        assertTrue(monitor.clockPage());
+        assertEquals("the restored cache must not be overwritten with empty inventory",
+                0L, file.length());
+
+        // Fresh layout invalidates the cache and persists the fresh facts instead.
+        monitor.parse(OVERVIEW_SCREEN9);
+        monitor.parse(SCREEN_9_WITH_CLOCK);
+        assertTrue(monitor.clockPage());
+        String saved = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+        assertTrue("fresh current page must be persisted: " + saved, saved.contains("current=9"));
+        assertTrue("fresh clock screen must be persisted: " + saved, saved.contains("screens=9"));
+    }
+
+    @Test
+    public void cacheFileRoundTripRestoresStateAfterRestart() throws Exception {
+        InventoryCache.bootIdForTests = "boot-x";
+        File file = File.createTempFile("miuitime_inventory", ".cache");
+        file.deleteOnExit();
+        Files.write(file.toPath(),
+                new InventoryCache("boot-x", 1, Collections.singletonList(1)).encode()
+                        .getBytes(StandardCharsets.UTF_8));
+
+        LauncherLogMonitor fresh = new LauncherLogMonitor();
+        try {
+            fresh.setCacheFile(file);
+            fresh.start((clockPage, overlayShowing) -> { });
+            assertTrue("a cache from the same boot must be restored", fresh.clockPage());
+        } finally {
+            fresh.stop();
+        }
+    }
+
+    @Test
+    public void cacheFileFromAnotherBootIsIgnored() throws Exception {
+        InventoryCache.bootIdForTests = "boot-x";
+        File file = File.createTempFile("miuitime_inventory", ".cache");
+        file.deleteOnExit();
+        Files.write(file.toPath(),
+                new InventoryCache("boot-OLD", 1, Collections.singletonList(1)).encode()
+                        .getBytes(StandardCharsets.UTF_8));
+
+        LauncherLogMonitor fresh = new LauncherLogMonitor();
+        try {
+            fresh.setCacheFile(file);
+            fresh.start((clockPage, overlayShowing) -> { });
+            assertFalse("a cache from a previous boot must never hide the clock", fresh.clockPage());
+        } finally {
+            fresh.stop();
+        }
     }
 }

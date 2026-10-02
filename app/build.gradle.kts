@@ -11,8 +11,8 @@ android {
         applicationId = "net.hestudio.miuitime"
         minSdk = 35
         targetSdk = 37
-        versionCode = 1003
-        versionName = "1.1.1"
+        versionCode = 1004
+        versionName = "1.1.2"
     }
 
     compileOptions {

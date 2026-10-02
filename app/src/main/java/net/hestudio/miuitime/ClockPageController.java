@@ -68,19 +68,19 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     private final AtomicBoolean probeBusy = new AtomicBoolean();
     private volatile boolean probeRequested;
 
-    private volatile boolean clockPage;
-    private volatile boolean overlayShowing;
-    private volatile boolean showPending;
-    /** Cached launcher-foreground state consumed by the apply path and the hide-flag computation. */
-    private volatile boolean launcherForeground;
-    /** Cached {@code sys.boot_completed} state. */
-    private volatile boolean bootReady;
     /**
-     * One-shot post-boot keyguard gate: stays closed until the first time the keyguard is observed
-     * unlocked, so nothing is hidden before the user has seen the lock screen once. It never
-     * closes again, so later lock/unlock cycles keep the clock state stable (no flash on unlock).
+     * Hide decision state and — critically — the publication of that decision to the enforcement
+     * hooks. The hooks only read the published flag, so the gate must publish <em>before</em>
+     * every apply action runs (see {@link HideGate#beginApply}); publishing after the action made
+     * the hooks veto the module's own show calls and left the clock {@code GONE} on non-clock
+     * pages.
      */
-    private volatile boolean keyguardGateOpen;
+    private final HideGate gate = new HideGate(new HideGate.Sink() {
+        @Override
+        public void publish(boolean forceHide) {
+            SystemUiClockHook.setForceHide(forceHide);
+        }
+    });
 
     private boolean applied;
     private boolean appliedHidden;
@@ -102,11 +102,15 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     private final Runnable applyRunnable = new Runnable() {
         @Override
         public void run() {
-            showPending = false;
-            boolean hide = computeForceHide(bootReady, keyguardGateOpen, launcherForeground,
-                    false, clockPage, overlayShowing);
-            apply(hide, lastReason);
-            updateForceHide();
+            // beginApply publishes the settled decision to the enforcement hooks BEFORE the
+            // hide/show calls run — the hooks veto any visibility call that contradicts the
+            // published flag, so acting first would leave the clock stuck GONE.
+            gate.beginApply(new HideGate.ApplyAction() {
+                @Override
+                public void run(boolean hide) {
+                    apply(hide, lastReason);
+                }
+            });
         }
     };
 
@@ -143,29 +147,10 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
         }
     }
 
-    /**
-     * Hide/enforce decision for the visibility hooks. Pure state computation, no side effects:
-     * it is published to {@link SystemUiClockHook#setForceHide(boolean)} whenever an input
-     * changes, so the hooks themselves never have to call into this class.
-     *
-     * <p>Everything defaults toward showing the clock: without boot completion, before the
-     * post-boot keyguard gate has opened, or without launcher foreground state, the answer is
-     * {@code false}.</p>
-     */
-    static boolean computeForceHide(boolean bootReady, boolean keyguardGateOpen,
-                                    boolean launcherForeground, boolean showPending,
-                                    boolean clockPage, boolean overlayShowing) {
-        return bootReady && keyguardGateOpen && launcherForeground
-                && (showPending || (clockPage && !overlayShowing));
-    }
-
-    private void updateForceHide() {
-        boolean hide = computeForceHide(bootReady, keyguardGateOpen, launcherForeground,
-                showPending, clockPage, overlayShowing);
-        SystemUiClockHook.setForceHide(hide);
-    }
-
     private void start() {
+        // The inventory cache file is resolved lazily by LauncherLogMonitor (the app files dir
+        // is not always available at this point); it bridges the mid-session SystemUI restart
+        // gap where the launcher's one-shot cold-start log lines are already gone.
         monitor.start(this);
         hookTaskStackEvents();
         requestProbe();
@@ -180,11 +165,12 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
 
     @Override
     public void onLauncherStateChanged(boolean clockPage, boolean overlayShowing) {
-        if (this.clockPage == clockPage && this.overlayShowing == overlayShowing) {
+        if (gate.clockPage() == clockPage && gate.overlayShowing() == overlayShowing) {
             return;
         }
-        this.clockPage = clockPage;
-        this.overlayShowing = overlayShowing;
+        // Gate state only; publication happens on the debounced apply path (pendingShow) so the
+        // clock stays collapsed for the whole settle window.
+        gate.onLauncherState(clockPage, overlayShowing);
         XLog.i("launcher clockPage=" + clockPage + " overlay=" + overlayShowing);
         reevaluate("launcher");
     }
@@ -200,9 +186,8 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
                 // applying only the settled state avoids a clock flicker. Shows settle
                 // longer than hides so a clock page briefly misdetected mid-swipe
                 // (e.g. before the launcher re-emits its exposure line) cannot flash.
-                boolean wantsHide = clockPage && !overlayShowing;
-                showPending = !wantsHide && applied && appliedHidden;
-                updateForceHide();
+                boolean wantsHide = gate.clockPage() && !gate.overlayShowing();
+                gate.pendingShow(!wantsHide && applied && appliedHidden);
                 mainHandler.removeCallbacks(applyRunnable);
                 mainHandler.postDelayed(applyRunnable,
                         wantsHide ? APPLY_DEBOUNCE_MS : APPLY_SHOW_DEBOUNCE_MS);
@@ -211,15 +196,15 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     }
 
     private void schedulePollIfNeeded() {
-        if ((clockPage || !keyguardGateOpen) && !pollScheduled) {
+        if ((gate.clockPage() || !gate.keyguardGateOpen()) && !pollScheduled) {
             pollScheduled = true;
             mainHandler.postDelayed(pollRunnable,
-                    keyguardGateOpen ? POLL_INTERVAL_MS : GATE_POLL_INTERVAL_MS);
+                    gate.keyguardGateOpen() ? POLL_INTERVAL_MS : GATE_POLL_INTERVAL_MS);
         }
     }
 
     /**
-     * Refreshes {@code launcherForeground}/{@code bootReady}/{@code keyguardGateOpen} off the main
+     * Refreshes the gate's launcher-foreground / boot / keyguard state off the main
      * thread. Coalesced: at most one probe runs at a time, and a request arriving mid-probe
      * triggers exactly one follow-up.
      */
@@ -257,26 +242,27 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     }
 
     private void applyProbe(boolean boot, boolean unlocked, boolean foreground) {
-        boolean changed = boot != bootReady
-                || (unlocked && !keyguardGateOpen)
-                || foreground != launcherForeground;
-        bootReady = boot;
-        if (unlocked) {
-            keyguardGateOpen = true;
-        }
-        launcherForeground = foreground;
-        updateForceHide();
+        boolean changed = gate.onProbe(boot, unlocked, foreground);
         schedulePollIfNeeded();
         if (changed) {
             // Fresh state can flip the decision (e.g. first unlock while on a clock page):
-            // re-run the debounced apply instead of waiting for the next event.
+            // re-run the debounced apply instead of waiting for the next event. Keep the
+            // direction-specific settle times (shows settle longer than hides) even here.
+            boolean wantsHide = gate.clockPage() && !gate.overlayShowing();
             mainHandler.removeCallbacks(applyRunnable);
-            mainHandler.postDelayed(applyRunnable, APPLY_DEBOUNCE_MS);
+            mainHandler.postDelayed(applyRunnable,
+                    wantsHide ? APPLY_DEBOUNCE_MS : APPLY_SHOW_DEBOUNCE_MS);
         }
     }
 
     private void apply(boolean hide, String reason) {
         if (applied && hide == appliedHidden) {
+            return;
+        }
+        if (!hide && !appliedHidden) {
+            // Nothing of ours to restore: the clock was never hidden by this module, so leave
+            // its visibility to SystemUI (e.g. its own "hide clock due to keyguard showing"
+            // policy) instead of actively re-showing it.
             return;
         }
         boolean success = hide ? hideClock() : showClock();
@@ -323,30 +309,49 @@ public final class ClockPageController implements LauncherLogMonitor.Listener {
     }
 
     /**
-     * Applies the clock view state directly. Hide collapses the view to {@code GONE} so its
+     * Applies the clock view state directly on every captured {@code id=clock} instance and
+     * verifies the result in the same frame. Hide collapses the views to {@code GONE} so their
      * layout width is freed (a plain INVISIBLE keeps the space reserved and the status bar
      * notification icons end up floating with a blank gap in front of them).
+     *
+     * <p>The verification turns silently vetoed calls into failures so {@link #apply} retries
+     * instead of recording a restore that never happened (the enforcement hooks rewrite any
+     * visibility call that contradicts the published flag — including the module's own, if the
+     * flag was not published first).</p>
      */
     private boolean applyViewVisibility(boolean hide) {
-        TextView view = SystemUiClockHook.statusBarClock();
-        if (view == null) {
+        List<TextView> clocks = SystemUiClockHook.statusBarClocks();
+        if (clocks.isEmpty()) {
             XLog.w("no status bar clock view captured");
             return false;
         }
+        int expected = hide ? GONE : VISIBLE;
         boolean ok = false;
-        try {
-            XposedHelpers.callMethod(view, "setPolicyVisibility", hide ? INVISIBLE : VISIBLE);
-            ok = true;
-        } catch (Throwable t) {
-            XLog.w("setPolicyVisibility failed", t);
+        for (TextView view : clocks) {
+            try {
+                XposedHelpers.callMethod(view, "setPolicyVisibility", hide ? INVISIBLE : VISIBLE);
+                ok = true;
+            } catch (Throwable t) {
+                XLog.w("setPolicyVisibility failed", t);
+            }
+            try {
+                view.setVisibility(hide ? GONE : VISIBLE);
+                ok = true;
+            } catch (Throwable t) {
+                XLog.w("setVisibility failed", t);
+            }
         }
-        try {
-            view.setVisibility(hide ? GONE : VISIBLE);
-            ok = true;
-        } catch (Throwable t) {
-            XLog.w("setVisibility failed", t);
+        if (!ok) {
+            return false;
         }
-        return ok;
+        for (TextView view : clocks) {
+            if (view.getVisibility() != expected) {
+                XLog.w("clock visibility not applied: want=" + expected
+                        + " got=" + view.getVisibility());
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Only the actual home screen activities count; launcher settings/recents must not. */
